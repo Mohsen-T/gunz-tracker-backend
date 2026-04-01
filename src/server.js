@@ -25,8 +25,10 @@ const morgan = require('morgan');
 const cron = require('node-cron');
 
 const apiRoutes = require('./routes/api');
+const marketplaceRoutes = require('./routes/marketplace');
 const { initCache } = require('./services/cache');
 const { syncAll } = require('./services/sync');
+const { syncMarketplace } = require('./services/marketplaceSync');
 const { query } = require('./db/pool');
 
 const app = express();
@@ -87,6 +89,7 @@ setInterval(() => {
 // Routes
 // =============================================
 app.use('/api', apiRoutes);
+app.use('/api/marketplace', marketplaceRoutes);
 
 // Root endpoint
 app.get('/', (req, res) => {
@@ -104,6 +107,10 @@ app.get('/', (req, res) => {
       search: '/api/search?q=',
       wallet: '/api/wallet/:address',
       health: '/api/health',
+      marketplaceListings: '/api/marketplace/listings',
+      marketplaceStats: '/api/marketplace/stats',
+      marketplaceSales: '/api/marketplace/sales',
+      marketplaceActivity: '/api/marketplace/activity',
     },
     source: 'api.gunzchain.app (public)',
     syncInterval: `${SYNC_INTERVAL} minutes`,
@@ -175,6 +182,7 @@ async function start() {
   const cronExpr = `*/${SYNC_INTERVAL} * * * *`;
   cron.schedule(cronExpr, () => {
     syncAll().catch(err => console.error('Cron sync failed:', err.message));
+    syncMarketplace().catch(err => console.error('Marketplace sync failed:', err.message));
   });
   console.log(`⏰ Sync scheduled every ${SYNC_INTERVAL} minutes (${cronExpr})`);
 }
