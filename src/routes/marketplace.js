@@ -13,6 +13,12 @@ const GI_CONTRACT = '0x9ED98e159BE43a8d42b64053831FCAE5e4d7d271';
 
 const router = Router();
 
+// Sanitize integer for safe inline usage in SQL (LIMIT/OFFSET)
+const safeInt = (val, fallback = 0) => {
+  const n = parseInt(val, 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+};
+
 // =============================================
 // GET /api/marketplace/listings — Browse active listings
 // =============================================
@@ -39,27 +45,27 @@ router.get('/listings', async (req, res) => {
 
     if (status) {
       where.push('ml.status = ?');
-      params.push(status);
+      params.push(String(status));
     }
     if (rarity) {
       where.push('ml.rarity = ?');
-      params.push(rarity);
+      params.push(String(rarity));
     }
     if (minPrice) {
       where.push('ml.price >= ?');
-      params.push(parseFloat(minPrice));
+      params.push(String(parseFloat(minPrice)));
     }
     if (maxPrice) {
       where.push('ml.price <= ?');
-      params.push(parseFloat(maxPrice));
+      params.push(String(parseFloat(maxPrice)));
     }
     if (contract) {
       where.push('ml.nft_contract = ?');
-      params.push(contract);
+      params.push(String(contract));
     }
     if (seller) {
       where.push('LOWER(ml.seller) = LOWER(?)');
-      params.push(seller);
+      params.push(String(seller));
     }
 
     const whereClause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
@@ -74,30 +80,30 @@ router.get('/listings', async (req, res) => {
     };
     const orderBy = orderMap[sort] || 'ml.created_at DESC';
 
-    const lim = Math.min(parseInt(limit), 100);
-    const off = parseInt(offset) || 0;
+    const lim = Math.min(safeInt(limit, 24), 100);
+    const off = safeInt(offset, 0);
 
     const result = await query(`
       SELECT
-        ml.listing_id AS "listingId",
-        ml.nft_contract AS "nftContract",
-        ml.token_id AS "tokenId",
+        ml.listing_id AS listingId,
+        ml.nft_contract AS nftContract,
+        ml.token_id AS tokenId,
         ml.seller,
         ml.price,
         ml.status,
         ml.buyer,
-        ml.created_at AS "createdAt",
-        ml.sold_at AS "soldAt",
+        ml.created_at AS createdAt,
+        ml.sold_at AS soldAt,
         ml.rarity,
         ml.hashpower,
-        ml.hexes_decoded AS "hexesDecoded",
-        ml.tx_hash AS "txHash",
-        (SELECT COUNT(*) FROM marketplace_offers mo WHERE mo.listing_id = ml.listing_id AND mo.accepted = 0 AND mo.withdrawn = 0) AS "offerCount"
+        ml.hexes_decoded AS hexesDecoded,
+        ml.tx_hash AS txHash,
+        (SELECT COUNT(*) FROM marketplace_offers mo WHERE mo.listing_id = ml.listing_id AND mo.accepted = 0 AND mo.withdrawn = 0) AS offerCount
       FROM marketplace_listings ml
       ${whereClause}
       ORDER BY ${orderBy}
-      LIMIT ? OFFSET ?
-    `, [...params, lim, off]);
+      LIMIT ${lim} OFFSET ${off}
+    `, params);
 
     const countResult = await query(
       `SELECT COUNT(*) AS count FROM marketplace_listings ml ${whereClause}`,
@@ -131,22 +137,22 @@ router.get('/listings/:id', async (req, res) => {
 
     const result = await query(`
       SELECT
-        ml.listing_id AS "listingId",
-        ml.nft_contract AS "nftContract",
-        ml.token_id AS "tokenId",
+        ml.listing_id AS listingId,
+        ml.nft_contract AS nftContract,
+        ml.token_id AS tokenId,
         ml.seller,
         ml.price,
         ml.status,
         ml.buyer,
-        ml.created_at AS "createdAt",
-        ml.sold_at AS "soldAt",
+        ml.created_at AS createdAt,
+        ml.sold_at AS soldAt,
         ml.rarity,
         ml.hashpower,
-        ml.hexes_decoded AS "hexesDecoded",
-        ml.tx_hash AS "txHash"
+        ml.hexes_decoded AS hexesDecoded,
+        ml.tx_hash AS txHash
       FROM marketplace_listings ml
       WHERE ml.listing_id = ?
-    `, [id]);
+    `, [String(id)]);
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Listing not found' });
@@ -155,16 +161,16 @@ router.get('/listings/:id', async (req, res) => {
     // Get offers for this listing
     const offersResult = await query(`
       SELECT
-        offer_id AS "offerId",
+        offer_id AS offerId,
         bidder,
         amount,
         accepted,
         withdrawn,
-        created_at AS "createdAt"
+        created_at AS createdAt
       FROM marketplace_offers
       WHERE listing_id = ?
       ORDER BY amount DESC
-    `, [id]);
+    `, [String(id)]);
 
     // Get node details from tracker
     const listing = result.rows[0];
@@ -172,24 +178,24 @@ router.get('/listings/:id', async (req, res) => {
     const nodeResult = await query(`
       SELECT
         id, rarity, activity,
-        hexes_decoded AS "hexesDecoded",
+        hexes_decoded AS hexesDecoded,
         hashpower,
-        hex_distribution_rate AS "hexesDistributionRate",
-        wallet_address AS "hackerWalletAddress"
+        hex_distribution_rate AS hexesDistributionRate,
+        wallet_address AS hackerWalletAddress
       FROM nodes WHERE id = ?
-    `, [listing.tokenId]);
+    `, [String(listing.tokenId)]);
     if (nodeResult.rows.length > 0) {
       nodeData = nodeResult.rows[0];
     }
 
     // Price history for this token
     const historyResult = await query(`
-      SELECT price, sold_at AS "soldAt", buyer
+      SELECT price, sold_at AS soldAt, buyer
       FROM marketplace_sales
       WHERE nft_contract = ? AND token_id = ?
       ORDER BY sold_at DESC
       LIMIT 20
-    `, [listing.nftContract, listing.tokenId]);
+    `, [String(listing.nftContract), String(listing.tokenId)]);
 
     const response = {
       ...listing,
@@ -220,32 +226,32 @@ router.get('/sales', async (req, res) => {
     const params = [];
     if (contract) {
       where.push('ms.nft_contract = ?');
-      params.push(contract);
+      params.push(String(contract));
     }
     const whereClause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
 
-    const lim = Math.min(parseInt(limit), 100);
-    const off = parseInt(offset) || 0;
+    const lim = Math.min(safeInt(limit, 50), 100);
+    const off = safeInt(offset, 0);
 
     const result = await query(`
       SELECT
-        ms.listing_id AS "listingId",
-        ms.nft_contract AS "nftContract",
-        ms.token_id AS "tokenId",
+        ms.listing_id AS listingId,
+        ms.nft_contract AS nftContract,
+        ms.token_id AS tokenId,
         ms.seller,
         ms.buyer,
         ms.price,
         ms.fee,
-        ms.sold_at AS "soldAt",
-        ms.tx_hash AS "txHash",
+        ms.sold_at AS soldAt,
+        ms.tx_hash AS txHash,
         ml.rarity,
         ml.hashpower
       FROM marketplace_sales ms
       LEFT JOIN marketplace_listings ml ON ml.listing_id = ms.listing_id
       ${whereClause}
       ORDER BY ms.sold_at DESC
-      LIMIT ? OFFSET ?
-    `, [...params, lim, off]);
+      LIMIT ${lim} OFFSET ${off}
+    `, params);
 
     const countResult = await query(
       `SELECT COUNT(*) AS count FROM marketplace_sales ms ${whereClause}`,
@@ -278,16 +284,16 @@ router.get('/stats', async (req, res) => {
     // Active listings count & floor
     const activeResult = await query(`
       SELECT
-        COUNT(*) AS "totalActive",
-        MIN(price) AS "floorPrice",
-        AVG(price) AS "avgPrice"
+        COUNT(*) AS totalActive,
+        MIN(price) AS floorPrice,
+        AVG(price) AS avgPrice
       FROM marketplace_listings
       WHERE status = 'Active'
     `);
 
     // Floor by rarity
     const floorByRarity = await query(`
-      SELECT rarity, MIN(price) AS "floorPrice", COUNT(*) AS count
+      SELECT rarity, MIN(price) AS floorPrice, COUNT(*) AS count
       FROM marketplace_listings
       WHERE status = 'Active' AND rarity IS NOT NULL
       GROUP BY rarity
@@ -296,9 +302,9 @@ router.get('/stats', async (req, res) => {
     // Total volume (all time)
     const volumeResult = await query(`
       SELECT
-        COUNT(*) AS "totalSales",
-        COALESCE(SUM(price), 0) AS "totalVolume",
-        COALESCE(AVG(price), 0) AS "avgSalePrice"
+        COUNT(*) AS totalSales,
+        COALESCE(SUM(price), 0) AS totalVolume,
+        COALESCE(AVG(price), 0) AS avgSalePrice
       FROM marketplace_sales
     `);
 
@@ -372,52 +378,54 @@ router.get('/activity', async (req, res) => {
     const cached = await cache.get(cacheKey);
     if (cached) return res.json(cached);
 
-    const lim = Math.min(parseInt(limit), 100);
+    const lim = Math.min(safeInt(limit, 30), 100);
+    const cancelLim = Math.min(lim, 20);
 
     // Combine recent listings and sales into activity feed
+    // Inline LIMIT to avoid mysql2 prepared statement issues
     const listings = await query(`
       SELECT
         'listing' AS type,
-        listing_id AS "id",
-        token_id AS "tokenId",
-        seller AS "actor",
+        listing_id AS id,
+        token_id AS tokenId,
+        seller AS actor,
         price,
         rarity,
-        created_at AS "timestamp"
+        created_at AS timestamp
       FROM marketplace_listings
       ORDER BY created_at DESC
-      LIMIT ?
-    `, [lim]);
+      LIMIT ${lim}
+    `);
 
     const sales = await query(`
       SELECT
         'sale' AS type,
-        ms.listing_id AS "id",
-        ms.token_id AS "tokenId",
-        ms.buyer AS "actor",
+        ms.listing_id AS id,
+        ms.token_id AS tokenId,
+        ms.buyer AS actor,
         ms.price,
         ml.rarity,
-        ms.sold_at AS "timestamp"
+        ms.sold_at AS timestamp
       FROM marketplace_sales ms
       LEFT JOIN marketplace_listings ml ON ml.listing_id = ms.listing_id
       ORDER BY ms.sold_at DESC
-      LIMIT ?
-    `, [lim]);
+      LIMIT ${lim}
+    `);
 
     const cancellations = await query(`
       SELECT
         'cancel' AS type,
-        listing_id AS "id",
-        token_id AS "tokenId",
-        seller AS "actor",
+        listing_id AS id,
+        token_id AS tokenId,
+        seller AS actor,
         price,
         rarity,
-        created_at AS "timestamp"
+        created_at AS timestamp
       FROM marketplace_listings
       WHERE status = 'Cancelled'
       ORDER BY created_at DESC
-      LIMIT ?
-    `, [Math.min(lim, 20)]);
+      LIMIT ${cancelLim}
+    `);
 
     // Merge and sort by timestamp desc
     const activity = [...listings.rows, ...sales.rows, ...cancellations.rows]
@@ -443,20 +451,20 @@ router.get('/token/:contract/:tokenId', async (req, res) => {
     if (cached) return res.json(cached);
 
     const activeResult = await query(`
-      SELECT listing_id AS "listingId", seller, price, status, created_at AS "createdAt"
+      SELECT listing_id AS listingId, seller, price, status, created_at AS createdAt
       FROM marketplace_listings
       WHERE nft_contract = ? AND token_id = ? AND status = 'Active'
       ORDER BY created_at DESC
       LIMIT 1
-    `, [contract, tokenId]);
+    `, [String(contract), String(tokenId)]);
 
     const salesResult = await query(`
-      SELECT price, seller, buyer, sold_at AS "soldAt", tx_hash AS "txHash"
+      SELECT price, seller, buyer, sold_at AS soldAt, tx_hash AS txHash
       FROM marketplace_sales
       WHERE nft_contract = ? AND token_id = ?
       ORDER BY sold_at DESC
       LIMIT 20
-    `, [contract, tokenId]);
+    `, [String(contract), String(tokenId)]);
 
     const response = {
       activeListing: activeResult.rows[0] || null,
