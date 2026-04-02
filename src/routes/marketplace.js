@@ -30,13 +30,14 @@ router.get('/listings', async (req, res) => {
       sort = 'newest',
       minPrice,
       maxPrice,
+      tokenId,
       contract,
       seller,
       limit = 24,
       offset = 0,
     } = req.query;
 
-    const cacheKey = `mp-listings-${rarity || 'all'}-${status}-${sort}-${minPrice || 0}-${maxPrice || 'max'}-${contract || 'all'}-${seller || 'all'}-${limit}-${offset}`;
+    const cacheKey = `mp-listings-${rarity || 'all'}-${status}-${sort}-${minPrice || 0}-${maxPrice || 'max'}-${tokenId || 'all'}-${contract || 'all'}-${seller || 'all'}-${limit}-${offset}`;
     const cached = await cache.get(cacheKey);
     if (cached) return res.json(cached);
 
@@ -47,9 +48,25 @@ router.get('/listings', async (req, res) => {
       where.push('ml.status = ?');
       params.push(String(status));
     }
+    // Multi-rarity: "Epic,Legendary" → IN clause
     if (rarity) {
-      where.push('ml.rarity = ?');
-      params.push(String(rarity));
+      const rarities = String(rarity).split(',').map(r => r.trim()).filter(Boolean);
+      if (rarities.length === 1) {
+        where.push('ml.rarity = ?');
+        params.push(rarities[0]);
+      } else if (rarities.length > 1) {
+        const placeholders = rarities.map(() => '?').join(',');
+        where.push(`ml.rarity IN (${placeholders})`);
+        params.push(...rarities);
+      }
+    }
+    // Token ID prefix search
+    if (tokenId) {
+      const id = String(tokenId).replace(/\D/g, '');
+      if (id) {
+        where.push('ml.token_id LIKE ?');
+        params.push(`${id}%`);
+      }
     }
     if (minPrice) {
       where.push('ml.price >= ?');
@@ -77,6 +94,8 @@ router.get('/listings', async (req, res) => {
       price_desc: 'ml.price DESC',
       hp_desc: 'ml.hashpower DESC',
       hexes_desc: 'ml.hexes_decoded DESC',
+      id_asc: 'CAST(ml.token_id AS UNSIGNED) ASC',
+      id_desc: 'CAST(ml.token_id AS UNSIGNED) DESC',
     };
     const orderBy = orderMap[sort] || 'ml.created_at DESC';
 
