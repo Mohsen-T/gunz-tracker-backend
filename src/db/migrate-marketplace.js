@@ -21,6 +21,8 @@ const STATEMENTS = [
     buyer             VARCHAR(42),
     created_at        TIMESTAMP NOT NULL,
     sold_at           TIMESTAMP NULL,
+    cancelled_at      TIMESTAMP NULL,
+    penalty_paid      DECIMAL(36,18) DEFAULT 0,
     tx_hash           VARCHAR(66),
     block_number      BIGINT UNSIGNED DEFAULT 0,
 
@@ -48,6 +50,7 @@ const STATEMENTS = [
     accepted          BOOLEAN NOT NULL DEFAULT FALSE,
     withdrawn         BOOLEAN NOT NULL DEFAULT FALSE,
     created_at        TIMESTAMP NOT NULL,
+    expires_at        TIMESTAMP NULL,
     tx_hash           VARCHAR(66),
     block_number      BIGINT UNSIGNED DEFAULT 0,
 

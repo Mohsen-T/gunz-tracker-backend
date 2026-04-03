@@ -498,4 +498,28 @@ router.get('/token/:contract/:tokenId', async (req, res) => {
   }
 });
 
+// =============================================
+// GET /api/marketplace/config — Marketplace contract configuration
+// =============================================
+router.get('/config', async (req, res) => {
+  try {
+    const cached = await cache.get('mp-config');
+    if (cached) return res.json(cached);
+
+    const response = {
+      sellerFeeBps: 300,          // 3%
+      cancelPenalty: 100,         // 100 GUN
+      minOfferAmount: 0.01,       // 0.01 GUN
+      offerDurationDays: 7,       // 7 days
+      contractAddress: process.env.MARKETPLACE_CONTRACT || null,
+    };
+
+    await cache.set('mp-config', response, 300);
+    res.json(response);
+  } catch (err) {
+    console.error('GET /api/marketplace/config error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch config' });
+  }
+});
+
 module.exports = router;
