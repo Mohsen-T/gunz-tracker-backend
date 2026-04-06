@@ -115,14 +115,27 @@ const STATEMENTS = [
   )`,
 ];
 
+const DROP_STATEMENTS = [
+  'DROP TABLE IF EXISTS marketplace_notifications',
+  'DROP TABLE IF EXISTS marketplace_sync_cursor',
+  'DROP TABLE IF EXISTS marketplace_stats',
+  'DROP TABLE IF EXISTS marketplace_sales',
+  'DROP TABLE IF EXISTS marketplace_offers',
+  'DROP TABLE IF EXISTS marketplace_listings',
+];
+
 async function migrate() {
   const conn = await mysql.createConnection(process.env.DATABASE_URL);
   try {
-    console.log('Running GUNZ Marketplace migration...');
+    console.log('Dropping existing marketplace tables...');
+    for (const sql of DROP_STATEMENTS) {
+      await conn.execute(sql);
+    }
+    console.log('Creating marketplace tables...');
     for (const sql of STATEMENTS) {
       await conn.execute(sql);
     }
-    console.log('Marketplace migration complete — all tables created');
+    console.log('Marketplace migration complete — all tables recreated');
 
     const [rows] = await conn.execute(
       `SELECT table_name FROM information_schema.tables

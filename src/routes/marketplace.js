@@ -612,15 +612,29 @@ router.get('/wallet/:address', async (req, res) => {
     `, [addr]);
 
     // Active offers made by this wallet
-    const offersResult = await query(`
-      SELECT mo.offer_id AS offerId, mo.listing_id AS listingId, mo.amount,
-        mo.expires_at AS expiresAt, mo.created_at AS createdAt,
-        ml.token_id AS tokenId, ml.rarity
-      FROM marketplace_offers mo
-      LEFT JOIN marketplace_listings ml ON ml.listing_id = mo.listing_id
-      WHERE LOWER(mo.bidder) = ? AND mo.accepted = FALSE AND mo.withdrawn = FALSE
-      ORDER BY mo.created_at DESC
-    `, [addr]);
+    let offersResult;
+    try {
+      offersResult = await query(`
+        SELECT mo.offer_id AS offerId, mo.listing_id AS listingId, mo.amount,
+          mo.expires_at AS expiresAt, mo.created_at AS createdAt,
+          ml.token_id AS tokenId, ml.rarity
+        FROM marketplace_offers mo
+        LEFT JOIN marketplace_listings ml ON ml.listing_id = mo.listing_id
+        WHERE LOWER(mo.bidder) = ? AND mo.accepted = FALSE AND mo.withdrawn = FALSE
+        ORDER BY mo.created_at DESC
+      `, [addr]);
+    } catch {
+      // Fallback if expires_at column doesn't exist yet
+      offersResult = await query(`
+        SELECT mo.offer_id AS offerId, mo.listing_id AS listingId, mo.amount,
+          mo.created_at AS createdAt,
+          ml.token_id AS tokenId, ml.rarity
+        FROM marketplace_offers mo
+        LEFT JOIN marketplace_listings ml ON ml.listing_id = mo.listing_id
+        WHERE LOWER(mo.bidder) = ? AND mo.accepted = FALSE AND mo.withdrawn = FALSE
+        ORDER BY mo.created_at DESC
+      `, [addr]);
+    }
 
     // Sales history (as seller or buyer)
     const salesResult = await query(`
