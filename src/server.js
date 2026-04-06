@@ -44,7 +44,7 @@ app.use(helmet({
 app.use(compression());
 app.use(cors({
   origin: process.env.FRONTEND_URL || '*',
-  methods: ['GET'],
+  methods: ['GET', 'POST'],
 }));
 app.use(morgan('short'));
 app.use(express.json());

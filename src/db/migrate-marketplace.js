@@ -91,6 +91,22 @@ const STATEMENTS = [
     created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   )`,
 
+  // User notifications (generated from on-chain events)
+  `CREATE TABLE IF NOT EXISTS marketplace_notifications (
+    id                INT AUTO_INCREMENT PRIMARY KEY,
+    wallet_address    VARCHAR(42) NOT NULL,
+    type              VARCHAR(30) NOT NULL,
+    message           TEXT NOT NULL,
+    token_id          VARCHAR(10),
+    tx_hash           VARCHAR(66),
+    is_read           BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+    INDEX idx_mn_wallet (wallet_address),
+    INDEX idx_mn_read (wallet_address, is_read),
+    INDEX idx_mn_created (created_at DESC)
+  )`,
+
   // Track sync cursor for marketplace event indexing
   `CREATE TABLE IF NOT EXISTS marketplace_sync_cursor (
     id                INT PRIMARY KEY DEFAULT 1,

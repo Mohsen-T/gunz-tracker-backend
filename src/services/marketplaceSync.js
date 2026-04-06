@@ -1,41 +1,32 @@
 /**
- * GUNZ Marketplace — On-Chain Event Sync
+ * GUNZ Marketplace v2 — On-Chain Event Sync
  *
- * Indexes Listed, Sale, ListingCancelled, OfferPlaced, OfferAccepted, OfferWithdrawn
- * events from the GunzMarketplace smart contract.
- *
- * Polls every sync interval, stores to MySQL, and updates in-memory marketplace index.
+ * Indexes all marketplace events from the GunzMarketplace contract.
+ * Polls every sync interval, stores to MySQL, creates notifications.
  */
 
-const { query, getClient } = require('../db/pool');
+const { query } = require('../db/pool');
 const cache = require('./cache');
 
 const GUNZSCAN_ETHERSCAN_API = 'https://gunzscan.io/api';
-const BLOCKS_PER_DAY = Math.round((24 * 60 * 60) / 2); // ~2s block time
-
-// Marketplace contract address (set after deployment)
 const MARKETPLACE_CONTRACT = process.env.MARKETPLACE_CONTRACT || '0x0000000000000000000000000000000000000000';
 
-// Event topic signatures (keccak256 hashes)
+// Event topic0 hashes (keccak256 of signatures from compiled ABI)
 const TOPICS = {
-  Listed:           '0x' + 'a6e1067d3eb7fe0335e9e0ab3c22811189659df872a924b89e7fae tried'.replace(/tried/, 'eae5f1a4f87cb37a9db5a5f99a37a55c6f7e76ffaba76e88feb4ffc'),
-  Sale:             '0x' + 'ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef',
-  ListingCancelled: null,
-  OfferPlaced:      null,
-  OfferAccepted:    null,
-  OfferWithdrawn:   null,
+  Listed:           '0x9791797c382de5e73cc7c32c32ffd8304e9b9cc1f6afd967990c1edd0729dba9',
+  Sale:             '0xf64c153fb1f9152a3751f5b937536b3dc5c6205ec165e101509dc21e8b6db5be',
+  ListingCancelled: '0xafd0a85a3f09cebbc7d9fcde08e8a7d0ebb0aa7d768a030915c3816a053d3c7a',
+  OfferPlaced:      '0x6bd129c89856ec910fcaef69015e4511ec697e15bcbe8ee0e8461ef5da5eae7b',
+  OfferAccepted:    '0x8f414bb7b1129208b5a842a85f18292a47ad72117cca38e4363cf80dc189ec16',
+  OfferWithdrawn:   '0xacbc44b7f46dc350c99fc0d9e5f61ed5c588cb4cdc6b69ea0deb0c5b28e5efc4',
+  OfferRefunded:    '0x0ff19d650f33b91267d83d6212cc3626e5486ee3f5ae85d7759385cb0853ac2b',
+  PriceUpdated:     '0x15819dd2fd9f6418b142e798d08a18d0bf06ea368f4480b7b0d3f75bd966bc48',
 };
 
-// We use a simplified approach: fetch ALL logs from the marketplace contract
-// and parse them by topic0. This is more reliable than individual topic filters.
+// ─── Helpers ───
 
-/**
- * Fetch the sync cursor (last indexed block) from DB.
- */
 async function getSyncCursor() {
-  const result = await query(
-    'SELECT last_block FROM marketplace_sync_cursor WHERE id = 1'
-  );
+  const result = await query('SELECT last_block FROM marketplace_sync_cursor WHERE id = 1');
   if (result.rows.length === 0) {
     await query('INSERT INTO marketplace_sync_cursor (id, last_block) VALUES (1, 0)');
     return 0;
@@ -43,19 +34,10 @@ async function getSyncCursor() {
   return parseInt(result.rows[0].last_block) || 0;
 }
 
-/**
- * Update sync cursor in DB.
- */
 async function setSyncCursor(block) {
-  await query(
-    'UPDATE marketplace_sync_cursor SET last_block = ?, updated_at = NOW() WHERE id = 1',
-    [block]
-  );
+  await query('UPDATE marketplace_sync_cursor SET last_block = ?, updated_at = NOW() WHERE id = 1', [block]);
 }
 
-/**
- * Get current block from GunzScan.
- */
 async function getCurrentBlock() {
   const ts = Math.floor(Date.now() / 1000);
   try {
@@ -67,23 +49,15 @@ async function getCurrentBlock() {
     const data = await resp.json();
     const raw = data.result;
     return parseInt(typeof raw === 'object' ? raw?.blockNumber : raw) || null;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
-/**
- * Fetch all event logs from the marketplace contract within a block range.
- */
 async function fetchMarketplaceLogs(fromBlock, toBlock) {
   const allLogs = [];
   let startBlock = fromBlock;
-
   for (let page = 0; page < 20; page++) {
     const url = `${GUNZSCAN_ETHERSCAN_API}?module=logs&action=getLogs` +
-      `&address=${MARKETPLACE_CONTRACT}` +
-      `&fromBlock=${startBlock}&toBlock=${toBlock}`;
-
+      `&address=${MARKETPLACE_CONTRACT}&fromBlock=${startBlock}&toBlock=${toBlock}`;
     try {
       const resp = await fetch(url, { signal: AbortSignal.timeout(15000) });
       if (!resp.ok) break;
@@ -93,107 +67,201 @@ async function fetchMarketplaceLogs(fromBlock, toBlock) {
       allLogs.push(...logs);
       if (logs.length < 1000) break;
       startBlock = parseInt(logs[logs.length - 1].blockNumber, 16) + 1;
-    } catch {
-      break;
-    }
+    } catch { break; }
   }
-
   return allLogs;
 }
 
-/**
- * Parse a Listed event from log data.
- * Event: Listed(uint256 indexed listingId, address indexed nftContract, uint256 indexed tokenId, address seller, uint256 price)
- */
-function parseListedEvent(log) {
-  const listingId = parseInt(log.topics[1], 16);
-  const nftContract = '0x' + log.topics[2].slice(26);
-  const tokenId = parseInt(log.topics[3], 16);
-  const data = log.data.slice(2);
-  const seller = '0x' + data.slice(24, 64);
-  const price = BigInt('0x' + data.slice(64, 128));
+function hexToAddr(hex) { return '0x' + hex.slice(26).toLowerCase(); }
+function hexToUint(hex) { return parseInt(hex, 16); }
+function hexToBigGun(hex) { return Number(BigInt('0x' + hex)) / 1e18; }
+function logTs(log) { return parseInt(log.timeStamp, 16) * 1000; }
+function logBlock(log) { return parseInt(log.blockNumber, 16); }
 
+// ─── Event Parsers (v2 contract) ───
+
+// Listed(uint256 indexed listingId, address indexed nftContract, uint256 indexed tokenId, address seller, uint256 price)
+function parseListed(log) {
+  const d = log.data.slice(2);
   return {
-    listingId,
-    nftContract,
-    tokenId: String(tokenId),
-    seller: seller.toLowerCase(),
-    price: Number(price) / 1e18,
-    timestamp: parseInt(log.timeStamp, 16) * 1000,
-    txHash: log.transactionHash,
-    blockNumber: parseInt(log.blockNumber, 16),
+    listingId: hexToUint(log.topics[1]),
+    nftContract: hexToAddr(log.topics[2]),
+    tokenId: String(hexToUint(log.topics[3])),
+    seller: '0x' + d.slice(24, 64).toLowerCase(),
+    price: hexToBigGun(d.slice(64, 128)),
+    timestamp: logTs(log), txHash: log.transactionHash, blockNumber: logBlock(log),
   };
 }
 
-/**
- * Parse a Sale event from log data.
- * Event: Sale(uint256 indexed listingId, address indexed buyer, uint256 price)
- */
-function parseSaleEvent(log) {
-  const listingId = parseInt(log.topics[1], 16);
-  const buyer = '0x' + log.topics[2].slice(26);
-  const data = log.data.slice(2);
-  const price = BigInt('0x' + data.slice(0, 64));
-
+// Sale(uint256 indexed listingId, address indexed buyer, uint256 price, uint256 fee)
+function parseSale(log) {
+  const d = log.data.slice(2);
   return {
-    listingId,
-    buyer: buyer.toLowerCase(),
-    price: Number(price) / 1e18,
-    timestamp: parseInt(log.timeStamp, 16) * 1000,
-    txHash: log.transactionHash,
-    blockNumber: parseInt(log.blockNumber, 16),
+    listingId: hexToUint(log.topics[1]),
+    buyer: hexToAddr(log.topics[2]),
+    price: hexToBigGun(d.slice(0, 64)),
+    fee: hexToBigGun(d.slice(64, 128)),
+    timestamp: logTs(log), txHash: log.transactionHash, blockNumber: logBlock(log),
   };
 }
 
-/**
- * Parse a ListingCancelled event.
- * Event: ListingCancelled(uint256 indexed listingId)
- */
-function parseCancelledEvent(log) {
+// ListingCancelled(uint256 indexed listingId, uint256 penalty)
+function parseCancelled(log) {
+  const d = log.data.slice(2);
   return {
-    listingId: parseInt(log.topics[1], 16),
-    timestamp: parseInt(log.timeStamp, 16) * 1000,
-    txHash: log.transactionHash,
-    blockNumber: parseInt(log.blockNumber, 16),
+    listingId: hexToUint(log.topics[1]),
+    penalty: hexToBigGun(d.slice(0, 64)),
+    timestamp: logTs(log), txHash: log.transactionHash, blockNumber: logBlock(log),
   };
 }
 
-/**
- * Parse an OfferPlaced event.
- * Event: OfferPlaced(uint256 indexed offerId, uint256 indexed listingId, address indexed bidder, uint256 amount)
- */
-function parseOfferPlacedEvent(log) {
-  const offerId = parseInt(log.topics[1], 16);
-  const listingId = parseInt(log.topics[2], 16);
-  const bidder = '0x' + log.topics[3].slice(26);
-  const data = log.data.slice(2);
-  const amount = BigInt('0x' + data.slice(0, 64));
-
+// PriceUpdated(uint256 indexed listingId, uint256 oldPrice, uint256 newPrice)
+function parsePriceUpdated(log) {
+  const d = log.data.slice(2);
   return {
-    offerId,
-    listingId,
-    bidder: bidder.toLowerCase(),
-    amount: Number(amount) / 1e18,
-    timestamp: parseInt(log.timeStamp, 16) * 1000,
-    txHash: log.transactionHash,
-    blockNumber: parseInt(log.blockNumber, 16),
+    listingId: hexToUint(log.topics[1]),
+    oldPrice: hexToBigGun(d.slice(0, 64)),
+    newPrice: hexToBigGun(d.slice(64, 128)),
+    timestamp: logTs(log), txHash: log.transactionHash, blockNumber: logBlock(log),
   };
 }
 
-/**
- * Parse an OfferAccepted event.
- * Event: OfferAccepted(uint256 indexed offerId, uint256 indexed listingId, address indexed bidder, uint256 amount)
- */
-function parseOfferAcceptedEvent(log) {
-  return parseOfferPlacedEvent(log); // same layout
+// OfferPlaced(uint256 indexed offerId, uint256 indexed listingId, address indexed bidder, uint256 amount, uint256 expiresAt)
+function parseOfferPlaced(log) {
+  const d = log.data.slice(2);
+  return {
+    offerId: hexToUint(log.topics[1]),
+    listingId: hexToUint(log.topics[2]),
+    bidder: hexToAddr(log.topics[3]),
+    amount: hexToBigGun(d.slice(0, 64)),
+    expiresAt: hexToUint('0x' + d.slice(64, 128)) * 1000,
+    timestamp: logTs(log), txHash: log.transactionHash, blockNumber: logBlock(log),
+  };
 }
 
-/**
- * Main sync function: index new marketplace events.
- */
+// OfferAccepted(uint256 indexed offerId, uint256 indexed listingId, address indexed bidder, uint256 amount, uint256 fee)
+function parseOfferAccepted(log) {
+  const d = log.data.slice(2);
+  return {
+    offerId: hexToUint(log.topics[1]),
+    listingId: hexToUint(log.topics[2]),
+    bidder: hexToAddr(log.topics[3]),
+    amount: hexToBigGun(d.slice(0, 64)),
+    fee: hexToBigGun(d.slice(64, 128)),
+    timestamp: logTs(log), txHash: log.transactionHash, blockNumber: logBlock(log),
+  };
+}
+
+// OfferWithdrawn(uint256 indexed offerId)
+function parseOfferWithdrawn(log) {
+  return {
+    offerId: hexToUint(log.topics[1]),
+    timestamp: logTs(log), txHash: log.transactionHash, blockNumber: logBlock(log),
+  };
+}
+
+// OfferRefunded(uint256 indexed offerId, address indexed bidder, uint256 amount)
+function parseOfferRefunded(log) {
+  const d = log.data.slice(2);
+  return {
+    offerId: hexToUint(log.topics[1]),
+    bidder: hexToAddr(log.topics[2]),
+    amount: hexToBigGun(d.slice(0, 64)),
+    timestamp: logTs(log), txHash: log.transactionHash, blockNumber: logBlock(log),
+  };
+}
+
+// ─── DB Writers ───
+
+async function upsertListing(evt) {
+  const nodeResult = await query('SELECT rarity, hashpower, hexes_decoded FROM nodes WHERE id = ?', [evt.tokenId]);
+  const node = nodeResult.rows[0] || {};
+  await query(`
+    INSERT INTO marketplace_listings
+      (listing_id, nft_contract, token_id, seller, price, status, created_at, tx_hash, block_number, rarity, hashpower, hexes_decoded)
+    VALUES (?, ?, ?, ?, ?, 'Active', FROM_UNIXTIME(? / 1000), ?, ?, ?, ?, ?)
+    ON DUPLICATE KEY UPDATE price = VALUES(price), status = 'Active', tx_hash = VALUES(tx_hash)
+  `, [evt.listingId, evt.nftContract, evt.tokenId, evt.seller, evt.price,
+      evt.timestamp, evt.txHash, evt.blockNumber, node.rarity || null, node.hashpower || 0, node.hexes_decoded || 0]);
+
+  await createNotification(evt.seller, 'listing', `Listed Node #${evt.tokenId} for ${evt.price.toFixed(2)} GUN`, evt.tokenId, evt.txHash);
+}
+
+async function processSale(evt) {
+  const lr = await query('SELECT nft_contract, token_id, seller, price FROM marketplace_listings WHERE listing_id = ?', [evt.listingId]);
+  const listing = lr.rows[0];
+  if (!listing) return;
+
+  await query('UPDATE marketplace_listings SET status = ?, buyer = ?, sold_at = FROM_UNIXTIME(? / 1000) WHERE listing_id = ?',
+    ['Sold', evt.buyer, evt.timestamp, evt.listingId]);
+
+  await query(`
+    INSERT INTO marketplace_sales (listing_id, nft_contract, token_id, seller, buyer, price, fee, sold_at, tx_hash, block_number)
+    VALUES (?, ?, ?, ?, ?, ?, ?, FROM_UNIXTIME(? / 1000), ?, ?)
+  `, [evt.listingId, listing.nft_contract, listing.token_id, listing.seller, evt.buyer, evt.price, evt.fee,
+      evt.timestamp, evt.txHash, evt.blockNumber]);
+
+  await createNotification(listing.seller, 'sale', `Node #${listing.token_id} sold for ${evt.price.toFixed(2)} GUN`, listing.token_id, evt.txHash);
+  await createNotification(evt.buyer, 'purchase', `Purchased Node #${listing.token_id} for ${evt.price.toFixed(2)} GUN`, listing.token_id, evt.txHash);
+}
+
+async function processCancellation(evt) {
+  await query('UPDATE marketplace_listings SET status = ?, cancelled_at = FROM_UNIXTIME(? / 1000), penalty_paid = ? WHERE listing_id = ?',
+    ['Cancelled', evt.timestamp, evt.penalty, evt.listingId]);
+}
+
+async function processPriceUpdate(evt) {
+  await query('UPDATE marketplace_listings SET price = ? WHERE listing_id = ?', [evt.newPrice, evt.listingId]);
+}
+
+async function processOfferPlaced(evt) {
+  await query(`
+    INSERT INTO marketplace_offers (offer_id, listing_id, bidder, amount, created_at, expires_at, tx_hash, block_number)
+    VALUES (?, ?, ?, ?, FROM_UNIXTIME(? / 1000), FROM_UNIXTIME(? / 1000), ?, ?)
+    ON DUPLICATE KEY UPDATE amount = VALUES(amount)
+  `, [evt.offerId, evt.listingId, evt.bidder, evt.amount,
+      evt.timestamp, evt.expiresAt, evt.txHash, evt.blockNumber]);
+
+  const lr = await query('SELECT seller, token_id FROM marketplace_listings WHERE listing_id = ?', [evt.listingId]);
+  if (lr.rows[0]) {
+    await createNotification(lr.rows[0].seller, 'offer', `New offer of ${evt.amount.toFixed(2)} GUN on Node #${lr.rows[0].token_id}`, lr.rows[0].token_id, evt.txHash);
+  }
+}
+
+async function processOfferAccepted(evt) {
+  await query('UPDATE marketplace_offers SET accepted = TRUE WHERE offer_id = ?', [evt.offerId]);
+
+  const lr = await query('SELECT token_id FROM marketplace_listings WHERE listing_id = ?', [evt.listingId]);
+  if (lr.rows[0]) {
+    await createNotification(evt.bidder, 'offer_accepted', `Your offer on Node #${lr.rows[0].token_id} was accepted`, lr.rows[0].token_id, evt.txHash);
+  }
+}
+
+async function processOfferWithdrawn(evt) {
+  await query('UPDATE marketplace_offers SET withdrawn = TRUE WHERE offer_id = ?', [evt.offerId]);
+}
+
+async function processOfferRefunded(evt) {
+  await query('UPDATE marketplace_offers SET withdrawn = TRUE WHERE offer_id = ?', [evt.offerId]);
+}
+
+// ─── Notifications ───
+
+async function createNotification(walletAddress, type, message, tokenId, txHash) {
+  try {
+    await query(`
+      INSERT INTO marketplace_notifications (wallet_address, type, message, token_id, tx_hash)
+      VALUES (?, ?, ?, ?, ?)
+    `, [walletAddress.toLowerCase(), type, message, tokenId || null, txHash || null]);
+  } catch (err) {
+    console.error('[marketplace-sync] Notification error:', err.message);
+  }
+}
+
+// ─── Main Sync ───
+
 async function syncMarketplace() {
   if (MARKETPLACE_CONTRACT === '0x0000000000000000000000000000000000000000') {
-    // Contract not deployed yet; skip silently
     return { synced: 0, events: 0 };
   }
 
@@ -203,38 +271,38 @@ async function syncMarketplace() {
   try {
     const lastBlock = await getSyncCursor();
     const currentBlock = await getCurrentBlock();
-    if (!currentBlock) return { synced: 0, events: 0, error: 'Cannot get current block' };
-    if (currentBlock <= lastBlock) return { synced: 0, events: 0 };
+    if (!currentBlock || currentBlock <= lastBlock) return { synced: 0, events: 0 };
 
     const fromBlock = lastBlock + 1;
     const logs = await fetchMarketplaceLogs(fromBlock, currentBlock);
 
-    // Known event topic0 signatures (computed from ABI)
-    // Listed(uint256,address,uint256,address,uint256)
-    const TOPIC_LISTED = '0x' + 'e1e1e1'; // placeholder — real hash set at deployment
-    // We'll match by structure instead since we don't have the compiled ABI yet
-
     for (const log of logs) {
       try {
         const topic0 = log.topics[0];
-        const topicCount = log.topics.length;
 
-        // Listed: 4 topics (topic0 + 3 indexed), data has seller + price
-        if (topicCount === 4 && log.data.length >= 130) {
-          const evt = parseListedEvent(log);
-          await upsertListing(evt);
+        if (topic0 === TOPICS.Listed) {
+          await upsertListing(parseListed(log));
           eventsProcessed++;
-        }
-        // Sale: 3 topics (topic0 + 2 indexed), data has price
-        else if (topicCount === 3 && log.data.length >= 66 && log.data.length < 130) {
-          const evt = parseSaleEvent(log);
-          await processSale(evt);
+        } else if (topic0 === TOPICS.Sale) {
+          await processSale(parseSale(log));
           eventsProcessed++;
-        }
-        // ListingCancelled: 2 topics, no data
-        else if (topicCount === 2 && log.data === '0x') {
-          const evt = parseCancelledEvent(log);
-          await processCancellation(evt);
+        } else if (topic0 === TOPICS.ListingCancelled) {
+          await processCancellation(parseCancelled(log));
+          eventsProcessed++;
+        } else if (topic0 === TOPICS.PriceUpdated) {
+          await processPriceUpdate(parsePriceUpdated(log));
+          eventsProcessed++;
+        } else if (topic0 === TOPICS.OfferPlaced) {
+          await processOfferPlaced(parseOfferPlaced(log));
+          eventsProcessed++;
+        } else if (topic0 === TOPICS.OfferAccepted) {
+          await processOfferAccepted(parseOfferAccepted(log));
+          eventsProcessed++;
+        } else if (topic0 === TOPICS.OfferWithdrawn) {
+          await processOfferWithdrawn(parseOfferWithdrawn(log));
+          eventsProcessed++;
+        } else if (topic0 === TOPICS.OfferRefunded) {
+          await processOfferRefunded(parseOfferRefunded(log));
           eventsProcessed++;
         }
       } catch (err) {
@@ -243,83 +311,17 @@ async function syncMarketplace() {
     }
 
     await setSyncCursor(currentBlock);
-    await cache.flush(); // clear marketplace caches
+    await cache.flush();
 
     const duration = Date.now() - startTime;
-    console.log(`[marketplace-sync] Synced blocks ${fromBlock}-${currentBlock}, ${eventsProcessed} events in ${duration}ms`);
-
+    if (eventsProcessed > 0) {
+      console.log(`[marketplace-sync] Synced blocks ${fromBlock}-${currentBlock}, ${eventsProcessed} events in ${duration}ms`);
+    }
     return { synced: currentBlock - fromBlock, events: eventsProcessed, duration };
   } catch (err) {
     console.error('[marketplace-sync] Error:', err.message);
     return { synced: 0, events: 0, error: err.message };
   }
-}
-
-/**
- * Upsert a listing into the DB.
- */
-async function upsertListing(evt) {
-  // Look up node data for snapshot
-  const nodeResult = await query(
-    'SELECT rarity, hashpower, hexes_decoded FROM nodes WHERE id = ?',
-    [evt.tokenId]
-  );
-  const node = nodeResult.rows[0] || {};
-
-  await query(`
-    INSERT INTO marketplace_listings
-      (listing_id, nft_contract, token_id, seller, price, status, created_at, tx_hash, block_number, rarity, hashpower, hexes_decoded)
-    VALUES (?, ?, ?, ?, ?, 'Active', FROM_UNIXTIME(? / 1000), ?, ?, ?, ?, ?)
-    ON DUPLICATE KEY UPDATE
-      price = VALUES(price),
-      status = 'Active',
-      tx_hash = VALUES(tx_hash)
-  `, [
-    evt.listingId, evt.nftContract, evt.tokenId, evt.seller, evt.price,
-    evt.timestamp, evt.txHash, evt.blockNumber,
-    node.rarity || null, node.hashpower || 0, node.hexes_decoded || 0,
-  ]);
-}
-
-/**
- * Process a sale event: update listing status and insert into sales table.
- */
-async function processSale(evt) {
-  // Get listing details
-  const listingResult = await query(
-    'SELECT nft_contract, token_id, seller, price FROM marketplace_listings WHERE listing_id = ?',
-    [evt.listingId]
-  );
-  const listing = listingResult.rows[0];
-  if (!listing) return;
-
-  // Update listing
-  await query(
-    'UPDATE marketplace_listings SET status = ?, buyer = ?, sold_at = FROM_UNIXTIME(? / 1000) WHERE listing_id = ?',
-    ['Sold', evt.buyer, evt.timestamp, evt.listingId]
-  );
-
-  // Insert sale record
-  const fee = evt.price * 0.025; // 2.5% fee estimate
-  await query(`
-    INSERT INTO marketplace_sales
-      (listing_id, nft_contract, token_id, seller, buyer, price, fee, sold_at, tx_hash, block_number)
-    VALUES (?, ?, ?, ?, ?, ?, ?, FROM_UNIXTIME(? / 1000), ?, ?)
-  `, [
-    evt.listingId, listing.nft_contract, listing.token_id,
-    listing.seller, evt.buyer, evt.price, fee,
-    evt.timestamp, evt.txHash, evt.blockNumber,
-  ]);
-}
-
-/**
- * Process a cancellation event.
- */
-async function processCancellation(evt) {
-  await query(
-    'UPDATE marketplace_listings SET status = ? WHERE listing_id = ?',
-    ['Cancelled', evt.listingId]
-  );
 }
 
 module.exports = { syncMarketplace };

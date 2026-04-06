@@ -522,4 +522,143 @@ router.get('/config', async (req, res) => {
   }
 });
 
+// =============================================
+// GET /api/marketplace/notifications/:address — User notifications
+// =============================================
+router.get('/notifications/:address', async (req, res) => {
+  try {
+    const { address } = req.params;
+    const { limit = 30, unreadOnly } = req.query;
+    const lim = Math.min(safeInt(limit, 30), 100);
+    const addr = String(address).toLowerCase();
+
+    const cacheKey = `mp-notif-${addr}-${unreadOnly || 'all'}-${lim}`;
+    const cached = await cache.get(cacheKey);
+    if (cached) return res.json(cached);
+
+    let whereExtra = '';
+    if (unreadOnly === 'true') whereExtra = ' AND is_read = FALSE';
+
+    const result = await query(`
+      SELECT id, type, message, token_id AS tokenId, tx_hash AS txHash,
+        is_read AS isRead, created_at AS createdAt
+      FROM marketplace_notifications
+      WHERE wallet_address = ?${whereExtra}
+      ORDER BY created_at DESC
+      LIMIT ${lim}
+    `, [addr]);
+
+    const unreadResult = await query(
+      'SELECT COUNT(*) AS count FROM marketplace_notifications WHERE wallet_address = ? AND is_read = FALSE',
+      [addr]
+    );
+
+    const response = {
+      notifications: result.rows,
+      unreadCount: parseInt(unreadResult.rows[0].count) || 0,
+    };
+
+    await cache.set(cacheKey, response, 15);
+    res.json(response);
+  } catch (err) {
+    console.error('GET /api/marketplace/notifications error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch notifications' });
+  }
+});
+
+// =============================================
+// POST /api/marketplace/notifications/read — Mark notifications as read
+// =============================================
+router.post('/notifications/read', async (req, res) => {
+  try {
+    const { address, ids } = req.body;
+    if (!address) return res.status(400).json({ error: 'address required' });
+    const addr = String(address).toLowerCase();
+
+    if (ids && Array.isArray(ids) && ids.length > 0) {
+      const placeholders = ids.map(() => '?').join(',');
+      await query(
+        `UPDATE marketplace_notifications SET is_read = TRUE WHERE wallet_address = ? AND id IN (${placeholders})`,
+        [addr, ...ids.map(id => safeInt(id))]
+      );
+    } else {
+      await query('UPDATE marketplace_notifications SET is_read = TRUE WHERE wallet_address = ?', [addr]);
+    }
+
+    await cache.del(`mp-notif-${addr}-all-30`);
+    await cache.del(`mp-notif-${addr}-true-30`);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /api/marketplace/notifications/read error:', err.message);
+    res.status(500).json({ error: 'Failed to mark read' });
+  }
+});
+
+// =============================================
+// GET /api/marketplace/wallet/:address — Wallet marketplace summary
+// =============================================
+router.get('/wallet/:address', async (req, res) => {
+  try {
+    const addr = String(req.params.address).toLowerCase();
+    const cacheKey = `mp-wallet-${addr}`;
+    const cached = await cache.get(cacheKey);
+    if (cached) return res.json(cached);
+
+    // Active listings by this wallet
+    const listingsResult = await query(`
+      SELECT listing_id AS listingId, token_id AS tokenId, price, rarity, created_at AS createdAt
+      FROM marketplace_listings WHERE LOWER(seller) = ? AND status = 'Active'
+      ORDER BY created_at DESC
+    `, [addr]);
+
+    // Active offers made by this wallet
+    const offersResult = await query(`
+      SELECT mo.offer_id AS offerId, mo.listing_id AS listingId, mo.amount,
+        mo.expires_at AS expiresAt, mo.created_at AS createdAt,
+        ml.token_id AS tokenId, ml.rarity
+      FROM marketplace_offers mo
+      LEFT JOIN marketplace_listings ml ON ml.listing_id = mo.listing_id
+      WHERE LOWER(mo.bidder) = ? AND mo.accepted = FALSE AND mo.withdrawn = FALSE
+      ORDER BY mo.created_at DESC
+    `, [addr]);
+
+    // Sales history (as seller or buyer)
+    const salesResult = await query(`
+      SELECT token_id AS tokenId, price, fee, seller, buyer, sold_at AS soldAt
+      FROM marketplace_sales
+      WHERE LOWER(seller) = ? OR LOWER(buyer) = ?
+      ORDER BY sold_at DESC LIMIT 50
+    `, [addr, addr]);
+
+    // Total stats
+    const soldResult = await query(
+      'SELECT COUNT(*) AS count, COALESCE(SUM(price), 0) AS volume FROM marketplace_sales WHERE LOWER(seller) = ?',
+      [addr]
+    );
+    const boughtResult = await query(
+      'SELECT COUNT(*) AS count, COALESCE(SUM(price), 0) AS volume FROM marketplace_sales WHERE LOWER(buyer) = ?',
+      [addr]
+    );
+
+    const response = {
+      address: addr,
+      activeListings: listingsResult.rows,
+      activeOffers: offersResult.rows,
+      salesHistory: salesResult.rows,
+      stats: {
+        totalSold: parseInt(soldResult.rows[0].count) || 0,
+        soldVolume: parseFloat(soldResult.rows[0].volume) || 0,
+        totalBought: parseInt(boughtResult.rows[0].count) || 0,
+        boughtVolume: parseFloat(boughtResult.rows[0].volume) || 0,
+      },
+    };
+
+    await cache.set(cacheKey, response, 30);
+    res.json(response);
+  } catch (err) {
+    console.error('GET /api/marketplace/wallet error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch wallet data' });
+  }
+});
+
 module.exports = router;
