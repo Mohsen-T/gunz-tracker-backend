@@ -644,6 +644,42 @@ router.get('/wallet/:address', async (req, res) => {
       ORDER BY sold_at DESC LIMIT 50
     `, [addr, addr]);
 
+    // NFTs currently owned via the marketplace (bought minus re-sold).
+    // Joins with the nodes table to enrich with rarity / hashpower / hexes when available.
+    // Includes NFTs currently in escrow (active listing) so the seller can still see them in Collected.
+    const ownedResult = await query(`
+      SELECT
+        latest.token_id AS id,
+        latest.nft_contract AS nftContract,
+        COALESCE(n.rarity, ml.rarity) AS rarity,
+        COALESCE(n.hashpower, ml.hashpower, 0) AS hashpower,
+        COALESCE(n.hexes_decoded, ml.hexes_decoded, 0) AS hexesDecoded,
+        n.activity AS activity,
+        latest.last_event_at AS acquiredAt
+      FROM (
+        -- Most recent sale per token where the user was the buyer
+        SELECT s.nft_contract, s.token_id, MAX(s.sold_at) AS last_event_at
+        FROM marketplace_sales s
+        WHERE LOWER(s.buyer) = ?
+        GROUP BY s.nft_contract, s.token_id
+      ) latest
+      LEFT JOIN nodes n ON n.id = latest.token_id
+      LEFT JOIN marketplace_listings ml
+        ON ml.nft_contract = latest.nft_contract AND ml.token_id = latest.token_id
+        AND ml.created_at = (
+          SELECT MAX(ml2.created_at) FROM marketplace_listings ml2
+          WHERE ml2.nft_contract = latest.nft_contract AND ml2.token_id = latest.token_id
+        )
+      WHERE NOT EXISTS (
+        -- Exclude tokens the user later sold
+        SELECT 1 FROM marketplace_sales s2
+        WHERE s2.nft_contract = latest.nft_contract
+          AND s2.token_id = latest.token_id
+          AND LOWER(s2.seller) = ?
+          AND s2.sold_at > latest.last_event_at
+      )
+    `, [addr, addr]);
+
     // Total stats
     const soldResult = await query(
       'SELECT COUNT(*) AS count, COALESCE(SUM(price), 0) AS volume FROM marketplace_sales WHERE LOWER(seller) = ?',
@@ -659,6 +695,7 @@ router.get('/wallet/:address', async (req, res) => {
       activeListings: listingsResult.rows,
       activeOffers: offersResult.rows,
       salesHistory: salesResult.rows,
+      ownedNfts: ownedResult.rows,
       stats: {
         totalSold: parseInt(soldResult.rows[0].count) || 0,
         soldVolume: parseFloat(soldResult.rows[0].volume) || 0,
