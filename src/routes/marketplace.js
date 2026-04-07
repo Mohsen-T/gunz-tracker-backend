@@ -675,4 +675,119 @@ router.get('/wallet/:address', async (req, res) => {
   }
 });
 
+// =============================================
+// POST /api/marketplace/local-sync — Frontend reports successful transactions
+// (used for local testing where the backend can't index events from local Hardhat)
+// =============================================
+router.post('/local-sync', async (req, res) => {
+  try {
+    const { type, ...data } = req.body;
+    if (!type) return res.status(400).json({ error: 'type required' });
+
+    switch (type) {
+      case 'listed': {
+        const { listingId, nftContract, tokenId, seller, price, txHash } = data;
+        const nodeResult = await query('SELECT rarity, hashpower, hexes_decoded FROM nodes WHERE id = ?', [String(tokenId)]);
+        const node = nodeResult.rows[0] || {};
+        await query(`
+          INSERT INTO marketplace_listings
+            (listing_id, nft_contract, token_id, seller, price, status, created_at, tx_hash, rarity, hashpower, hexes_decoded)
+          VALUES (?, ?, ?, ?, ?, 'Active', NOW(), ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE price = VALUES(price), status = 'Active', tx_hash = VALUES(tx_hash)
+        `, [listingId, String(nftContract).toLowerCase(), String(tokenId), String(seller).toLowerCase(),
+            String(price), txHash || null, node.rarity || null, node.hashpower || 0, node.hexes_decoded || 0]);
+        break;
+      }
+
+      case 'sale': {
+        const { listingId, buyer, price, fee, txHash } = data;
+        const lr = await query('SELECT nft_contract, token_id, seller FROM marketplace_listings WHERE listing_id = ?', [listingId]);
+        const listing = lr.rows[0];
+        if (listing) {
+          await query('UPDATE marketplace_listings SET status = ?, buyer = ?, sold_at = NOW() WHERE listing_id = ?',
+            ['Sold', String(buyer).toLowerCase(), listingId]);
+          await query(`
+            INSERT INTO marketplace_sales (listing_id, nft_contract, token_id, seller, buyer, price, fee, sold_at, tx_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), ?)
+          `, [listingId, listing.nft_contract, listing.token_id, listing.seller,
+              String(buyer).toLowerCase(), String(price), String(fee || 0), txHash || null]);
+          // Auto-refund all offers
+          await query('UPDATE marketplace_offers SET withdrawn = TRUE WHERE listing_id = ? AND accepted = FALSE AND withdrawn = FALSE', [listingId]);
+          // Notifications
+          await query(`INSERT INTO marketplace_notifications (wallet_address, type, message, token_id, tx_hash)
+            VALUES (?, 'sale', ?, ?, ?)`,
+            [listing.seller, `Node #${listing.token_id} sold for ${Number(price).toFixed(2)} GUN`, listing.token_id, txHash || null]);
+          await query(`INSERT INTO marketplace_notifications (wallet_address, type, message, token_id, tx_hash)
+            VALUES (?, 'purchase', ?, ?, ?)`,
+            [String(buyer).toLowerCase(), `Purchased Node #${listing.token_id} for ${Number(price).toFixed(2)} GUN`, listing.token_id, txHash || null]);
+        }
+        break;
+      }
+
+      case 'cancelled': {
+        const { listingId, penalty, txHash } = data;
+        await query('UPDATE marketplace_listings SET status = ?, cancelled_at = NOW(), penalty_paid = ?, tx_hash = ? WHERE listing_id = ?',
+          ['Cancelled', String(penalty || 0), txHash || null, listingId]);
+        await query('UPDATE marketplace_offers SET withdrawn = TRUE WHERE listing_id = ? AND accepted = FALSE AND withdrawn = FALSE', [listingId]);
+        break;
+      }
+
+      case 'offer-placed': {
+        const { offerId, listingId, bidder, amount, expiresAt, txHash } = data;
+        await query(`
+          INSERT INTO marketplace_offers (offer_id, listing_id, bidder, amount, created_at, expires_at, tx_hash)
+          VALUES (?, ?, ?, ?, NOW(), FROM_UNIXTIME(? / 1000), ?)
+          ON DUPLICATE KEY UPDATE amount = VALUES(amount)
+        `, [offerId, listingId, String(bidder).toLowerCase(), String(amount),
+            expiresAt || (Date.now() + 7 * 86400 * 1000), txHash || null]);
+        // Notify seller
+        const lr = await query('SELECT seller, token_id FROM marketplace_listings WHERE listing_id = ?', [listingId]);
+        if (lr.rows[0]) {
+          await query(`INSERT INTO marketplace_notifications (wallet_address, type, message, token_id, tx_hash)
+            VALUES (?, 'offer', ?, ?, ?)`,
+            [lr.rows[0].seller, `New offer of ${Number(amount).toFixed(2)} GUN on Node #${lr.rows[0].token_id}`, lr.rows[0].token_id, txHash || null]);
+        }
+        break;
+      }
+
+      case 'offer-accepted': {
+        const { offerId, listingId, bidder, amount, fee, txHash } = data;
+        const lr = await query('SELECT nft_contract, token_id, seller FROM marketplace_listings WHERE listing_id = ?', [listingId]);
+        const listing = lr.rows[0];
+        if (listing) {
+          await query('UPDATE marketplace_offers SET accepted = TRUE WHERE offer_id = ?', [offerId]);
+          await query('UPDATE marketplace_listings SET status = ?, buyer = ?, sold_at = NOW() WHERE listing_id = ?',
+            ['Sold', String(bidder).toLowerCase(), listingId]);
+          await query(`
+            INSERT INTO marketplace_sales (listing_id, nft_contract, token_id, seller, buyer, price, fee, sold_at, tx_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), ?)
+          `, [listingId, listing.nft_contract, listing.token_id, listing.seller,
+              String(bidder).toLowerCase(), String(amount), String(fee || 0), txHash || null]);
+          await query('UPDATE marketplace_offers SET withdrawn = TRUE WHERE listing_id = ? AND offer_id != ? AND accepted = FALSE AND withdrawn = FALSE', [listingId, offerId]);
+          await query(`INSERT INTO marketplace_notifications (wallet_address, type, message, token_id, tx_hash)
+            VALUES (?, 'offer_accepted', ?, ?, ?)`,
+            [String(bidder).toLowerCase(), `Your offer on Node #${listing.token_id} was accepted`, listing.token_id, txHash || null]);
+        }
+        break;
+      }
+
+      case 'offer-withdrawn': {
+        const { offerId, txHash } = data;
+        await query('UPDATE marketplace_offers SET withdrawn = TRUE WHERE offer_id = ?', [offerId]);
+        break;
+      }
+
+      default:
+        return res.status(400).json({ error: `Unknown type: ${type}` });
+    }
+
+    // Flush all marketplace caches so UI shows fresh data
+    await cache.flush();
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /api/marketplace/local-sync error:', err.message);
+    res.status(500).json({ error: 'Failed to sync', detail: err.message });
+  }
+});
+
 module.exports = router;
