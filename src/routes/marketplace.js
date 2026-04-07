@@ -408,6 +408,8 @@ router.get('/activity', async (req, res) => {
         listing_id AS id,
         token_id AS tokenId,
         seller AS actor,
+        seller,
+        NULL AS buyer,
         price,
         rarity,
         created_at AS timestamp
@@ -422,6 +424,8 @@ router.get('/activity', async (req, res) => {
         ms.listing_id AS id,
         ms.token_id AS tokenId,
         ms.buyer AS actor,
+        ms.seller,
+        ms.buyer,
         ms.price,
         ml.rarity,
         ms.sold_at AS timestamp
@@ -437,6 +441,8 @@ router.get('/activity', async (req, res) => {
         listing_id AS id,
         token_id AS tokenId,
         seller AS actor,
+        seller,
+        NULL AS buyer,
         price,
         rarity,
         created_at AS timestamp
