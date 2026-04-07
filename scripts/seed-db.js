@@ -18,6 +18,15 @@ async function seed() {
   const conn = await mysql.createConnection(process.env.DATABASE_URL);
   console.log('Connected to DB');
 
+  // Wipe ALL stale marketplace data from previous Hardhat sessions.
+  // The contract addresses change every redeploy, so old rows are useless.
+  console.log('Clearing stale marketplace data...');
+  await conn.execute('DELETE FROM marketplace_sales');
+  await conn.execute('DELETE FROM marketplace_offers');
+  await conn.execute('DELETE FROM marketplace_listings');
+  await conn.execute('DELETE FROM marketplace_notifications');
+  console.log('  Cleared sales, offers, listings, notifications');
+
   const deployer = '0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266';
   const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
 
