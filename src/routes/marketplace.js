@@ -642,6 +642,34 @@ router.get('/wallet/:address', async (req, res) => {
       `, [addr]);
     }
 
+    // Active offers RECEIVED on this wallet's listings (offers others made on you)
+    let receivedOffersResult;
+    try {
+      receivedOffersResult = await query(`
+        SELECT mo.offer_id AS offerId, mo.listing_id AS listingId, mo.bidder, mo.amount,
+          mo.expires_at AS expiresAt, mo.created_at AS createdAt,
+          ml.token_id AS tokenId, ml.rarity, ml.price AS listingPrice
+        FROM marketplace_offers mo
+        INNER JOIN marketplace_listings ml ON ml.listing_id = mo.listing_id
+        WHERE LOWER(ml.seller) = ?
+          AND ml.status = 'Active'
+          AND mo.accepted = FALSE AND mo.withdrawn = FALSE
+        ORDER BY mo.amount DESC, mo.created_at DESC
+      `, [addr]);
+    } catch {
+      receivedOffersResult = await query(`
+        SELECT mo.offer_id AS offerId, mo.listing_id AS listingId, mo.bidder, mo.amount,
+          mo.created_at AS createdAt,
+          ml.token_id AS tokenId, ml.rarity, ml.price AS listingPrice
+        FROM marketplace_offers mo
+        INNER JOIN marketplace_listings ml ON ml.listing_id = mo.listing_id
+        WHERE LOWER(ml.seller) = ?
+          AND ml.status = 'Active'
+          AND mo.accepted = FALSE AND mo.withdrawn = FALSE
+        ORDER BY mo.amount DESC, mo.created_at DESC
+      `, [addr]);
+    }
+
     // Sales history (as seller or buyer)
     const salesResult = await query(`
       SELECT token_id AS tokenId, price, fee, seller, buyer, sold_at AS soldAt
@@ -700,6 +728,7 @@ router.get('/wallet/:address', async (req, res) => {
       address: addr,
       activeListings: listingsResult.rows,
       activeOffers: offersResult.rows,
+      receivedOffers: receivedOffersResult.rows,
       salesHistory: salesResult.rows,
       ownedNfts: ownedResult.rows,
       stats: {
