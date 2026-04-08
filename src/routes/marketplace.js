@@ -514,7 +514,7 @@ router.get('/config', async (req, res) => {
 
     const response = {
       sellerFeeBps: 300,          // 3%
-      cancelPenalty: 100,         // 100 GUN
+      cancelPenalty: 1000,        // 1000 GUN
       minOfferAmount: 0.01,       // 0.01 GUN
       offerDurationDays: 7,       // 7 days
       contractAddress: process.env.MARKETPLACE_CONTRACT || null,
@@ -846,6 +846,25 @@ router.post('/local-sync', async (req, res) => {
       case 'offer-withdrawn': {
         const { offerId, txHash } = data;
         await query('UPDATE marketplace_offers SET withdrawn = TRUE WHERE offer_id = ?', [offerId]);
+        break;
+      }
+
+      case 'offer-rejected': {
+        const { offerId, txHash } = data;
+        await query('UPDATE marketplace_offers SET withdrawn = TRUE WHERE offer_id = ?', [offerId]);
+        // Notify the bidder
+        const or = await query(`
+          SELECT mo.bidder, ml.token_id FROM marketplace_offers mo
+          LEFT JOIN marketplace_listings ml ON ml.listing_id = mo.listing_id
+          WHERE mo.offer_id = ?
+        `, [offerId]);
+        if (or.rows[0]) {
+          await query(`INSERT INTO marketplace_notifications (wallet_address, type, message, token_id, tx_hash)
+            VALUES (?, 'offer_rejected', ?, ?, ?)`,
+            [String(or.rows[0].bidder).toLowerCase(),
+             `Your offer on Node #${or.rows[0].token_id} was declined`,
+             or.rows[0].token_id, txHash || null]);
+        }
         break;
       }
 

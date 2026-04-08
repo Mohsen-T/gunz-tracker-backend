@@ -20,6 +20,7 @@ const TOPICS = {
   OfferAccepted:    '0x8f414bb7b1129208b5a842a85f18292a47ad72117cca38e4363cf80dc189ec16',
   OfferWithdrawn:   '0xacbc44b7f46dc350c99fc0d9e5f61ed5c588cb4cdc6b69ea0deb0c5b28e5efc4',
   OfferRefunded:    '0x0ff19d650f33b91267d83d6212cc3626e5486ee3f5ae85d7759385cb0853ac2b',
+  OfferRejected:    '0x312b83f85b04b08d3a1df0a1acfd41d45c404bcdc7adaeb3c5a86479378845aa',
   PriceUpdated:     '0x15819dd2fd9f6418b142e798d08a18d0bf06ea368f4480b7b0d3f75bd966bc48',
 };
 
